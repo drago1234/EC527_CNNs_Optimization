@@ -6,10 +6,10 @@ INCL_DIR   = ./include
 OUTPUT_DIR = ./output
 OBJECTS    = $(addprefix $(OBJ_DIR)/, read_csv.o write_csv.o forward_propagation.o back_propagation.o mlp_trainer.o mlp_classifier.o)
 INCLUDES   = $(addprefix $(INCL_DIR)/, read_csv.h write_csv.h forward_propagation.h back_propagation.h mlp_trainer.h mlp_classifier.h parameters.h)
-CFLAGS     = -g -Wall -O1 -pg		# -pg: with gprof
+CFLAGS     = -O1 -pg		# -pg: with gprof
 EXECUTABLE = MLP
 
-CPPFLAGS =  -O1 -lrt -lm # Extra flag gives to C preprocessor, for dynamic linking with pthread library; and for math library
+CPPFLAGS =  -O1 -pg -lrt -lm # Extra flag gives to C preprocessor, for dynamic linking with pthread library; and for math library
 
 # Generate the executable file
 $(EXECUTABLE): $(SRC_DIR)/main.c $(OBJECTS)
@@ -26,22 +26,33 @@ clean:
 	rm -rf $(EXECUTABLE)*
 
 ############## ==> Customized GPU Test obj
+objects = test_1d_conv_cpu
+
+all: $(objects)
+
 cuda_add: $(SRC_DIR)/cuda_add.cu
-	nvcc -g -G $(CPPFLAGS) $< -o $@
+	nvcc -g -G $(CFLAGS) $< -o $@
 	./$@ >> $(OUTPUT_DIR)/$@.txt
 
 cuda_sor:  $(SRC_DIR)/cuda_sor.cu
-	nvcc -g -G $(CPPFLAGS) $< -o $@
+	nvcc -g -G $(CFLAGS) $< -o $@
 	./$@ >> $(OUTPUT_DIR)/$@.txt
+
+test_1d_conv_cpu: $(SRC_DIR)/test_1d_conv_cpu.cu
+	nvcc -g -G $(CFLAGS) $< -o $@
+	./$@ >> $(OUTPUT_DIR)/$@.txt
+	gprof ./$@ gmon.out > analysis.txt
 
 test_1d_conv: $(SRC_DIR)/test_1d_conv.cu
-	nvcc -g -G $(CPPFLAGS) $< -o $@
-	./$@ >> $(OUTPUT_DIR)/$@.txt
+	nvcc -g -G $(CFLAGS) $< -o $@
+	./$@ >> $(OUTPUT_DIR)/test_1d_conv.txt
+	gprof ./$@ gmon.out > analysis.txt
+	nvprof ./$@ >> analysis.txt
 
-test_1d_conv_no_padding: $(SRC_DIR)/test_1d_conv_no_padding.cu
-	nvcc -g -G $(CPPFLAGS) $< -o $@
-	./$@ >> $(OUTPUT_DIR)/test_1d_conv_no_padding_task5.txt
+convolution: $(SRC_DIR)/convolution.cu
+	nvcc -g -G $(CFLAGS) $< -o $@
+	./$@ >> $(OUTPUT_DIR)/convolution.txt
 
 test_mat_mul: $(SRC_DIR)/test_mat_mul.cu
-	nvcc -g -G $(CPPFLAGS) $< -o $@
+	nvcc -g -G $(CFLAGS) $< -o $@
 	./$@

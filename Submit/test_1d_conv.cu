@@ -34,7 +34,7 @@ inline void gpuAssert(cudaError_t code, char *file, int line, bool abort = true)
 
 // Things for running on GPU
 #define PRINT_TIME 1			 // Whether we want to measure time cost (1/0)
-#define NUM_THREADS_PER_BLOCK 128 // Number of threads per block
+// #define NUM_THREADS_PER_BLOCK 16 // Number of threads per block
 #define TOL 0.05
 
 #define ITERATIONS 2000
@@ -42,7 +42,7 @@ inline void gpuAssert(cudaError_t code, char *file, int line, bool abort = true)
 #define MAXVAL 10.0
 
 // Things for 1D_Conv
-#define N_ARR_LEN 1000000000  // array/vector size for output (P), must be multiple of NUM_THREADS_PER_BLOCK ==> Otherwise, you will have unmatched result...
+// #define N_ARR_LEN 10000000  // array/vector size for output (P), must be multiple of NUM_THREADS_PER_BLOCK ==> Otherwise, you will have unmatched result...
 #define MASK_WIDTH 3  // array size for mask (M)
 #define GHOST_WIDTH 1 // padding cell, e.g., if GHOST_WIDTH = 1, then each side of row will have 1 padding
 
@@ -58,8 +58,8 @@ void conv_1D(float *N, float *M, float *P, int mask_width, int N_rowlen);
 __global__ void cuda_conv_1D_single_block(float *N, float *M, float *P, int mask_width, int N_rowlen);
 __global__ void cuda_conv_1D_multi_block(float *N, float *M, float *P, int mask_width, int N_rowlen);
 __global__ void cuda_conv_1D_multi_block_with_mask_in_constant_memory(float *N, float *P, int mask_width, int N_rowlen);
-__global__ void cuda_conv_1D_tiled_kernel(float *N, float *P, int mask_width, int N_rowlen);
-__global__ void convolution_1D_tiled_cache_kernel(float *N, float *P, int mask_width, int N_rowlen);
+__global__ void cuda_conv_1D_tiled_and_shared_memory_kernel(float *N, float *P, int mask_width, int N_rowlen);
+__global__ void cuda_conv_1D_tiled_and_shared_memory_kernel2(float *N, float *P, int mask_width, int N_rowlen);
 
 /* Things to put into device constant memory */
 __constant__ float d_mask_constant[MASK_WIDTH];
@@ -133,7 +133,25 @@ int main(int argc, char *argv[])
 	int start_point = 0;
 	// 1D_Conv variables
 	int HALO_CELL = ceil(MASK_WIDTH / 2); /* 2 extra rows/columns for "ghost zone". */
-	int P_ARR_LEN = N_ARR_LEN;			  // 1 for start, 1 for end
+
+	int taskid = 6; // 1(1D single block) --> 2(1D multi-block) --> 3(1D tiled algo with shared memory)
+	if (argc > 1) {
+		taskid  = atoi(argv[1]);
+	}
+
+	// Length for input array N 
+	int N_ARR_LEN = 1024;	//1000000000
+	if (argc > 2) {
+		N_ARR_LEN  = atoi(argv[2]);
+	}
+	int P_ARR_LEN = N_ARR_LEN;			  // They should be equal, 1 for start, 1 for end
+
+	// Number of threads for each block
+	int NUM_THREADS_PER_BLOCK = 16;
+	if (argc > 3) {
+		N_ARR_LEN  = atoi(argv[3]);
+	}
+
 	// GPU Timing variables
 	cudaEvent_t start, stop;
 	float elapsed_gpu;
@@ -145,60 +163,51 @@ int main(int argc, char *argv[])
 	printf("Length of mask array(M): %d\n", MASK_WIDTH);
 	printf("Length of output array(P): %d\n", P_ARR_LEN);
 
-	/* ======================Memory Allocation (CPU & GPU) =============== */
+	/* ======================Memory Allocation and initialization(CPU & GPU) =============== */
 	size_t alloc_size = (N_ARR_LEN) * sizeof(float);
-	// printf("%d element bing allocated, and %ld size in byte\n", N_ARR_LEN, alloc_size);
 
-	// Allocate arrays on host memory (calloc will use zero-initialization)
-	float *h_input = (float *)calloc(N_ARR_LEN, sizeof(float));
-	float *h_mask = (float *)calloc(MASK_WIDTH, sizeof(float));
-	float *h_output_gold = (float *)calloc(P_ARR_LEN, sizeof(float)); // result computed in CPU
-	float *h_output_data = (float *)calloc(P_ARR_LEN, sizeof(float)); // result computed in GPU
-
-	// Allocate GPU memory
-	float *d_input, *d_mask, *d_output_data; // Arrays on GPU global memory
-	cudaMalloc((void **)&d_input, N_ARR_LEN * sizeof(float));
-	cudaMalloc((void **)&d_mask, MASK_WIDTH * sizeof(float));
-	cudaMalloc((void **)&d_output_data, P_ARR_LEN * sizeof(float));
-
-	/* ====================== Memory Initialization =============== */
 	// Intialize arrays on host memory
-	printf("\nInitializing the arrays ...\n");
-	// Arrays are initialized with a known seed for reproducability
-	// initializeArray1D_ignore_ghost_cell(h_input, N_ARR_LEN, GHOST_WIDTH, 2453);
-
-	// Intialize value for h_input(NO PADDING): The input can be anything, we don't care in general
-	printf("Checking Intialized value for h_input\n");
+	printf("\nInitializing the input arrays, h_input...\n");
+	float *h_input = (float *)calloc(N_ARR_LEN, sizeof(float));
 	for (i = 0; i < N_ARR_LEN; i++){
 		// h_input 			= {0, 1, 2, 3, 4, 5, 0};
-		h_input[i] = (float)i;
+		if((i<HALO_CELL) || (i>= (N_ARR_LEN-HALO_CELL))){
+			h_input[i] = 0;
+		}else{
+			h_input[i] = rand() % 100;
+		}
 		if (i > N_ARR_LEN - 5)
 			printf("h_input[%d] = %.2f\n", i, h_input[i]);
 	}
-	printf("...\n");
 
 	// Intialize value for h_mask
-	int random_init = 1;
+	float *h_mask = (float *)calloc(MASK_WIDTH, sizeof(float));
+	int random_init = 1; 
 	if (random_init){
-		initializeArray1D(h_mask, MASK_WIDTH, 2453);
+		for(int i = 0; i<MASK_WIDTH; i++){
+			h_mask[i] = rand() % 10;
+		}
 	}else{
 		h_mask[0] = 0.3;
 		h_mask[1] = 0.2;
 		h_mask[2] = 0.8;
 	}
-
 	// Check initialized values
 	printf("Checking Intialized value for h_mask\n");
 	for (i = 0; i < MASK_WIDTH; i++){
 		printf("h_mask[%d] = %.2f\n", i, h_mask[i]);
 	}
-	// print_1D_array(h_output_gold, P_ARR_LEN);
-	// print_1D_array(h_output_data, P_ARR_LEN);
-	// print_1D_array(h_input, N_ARR_LEN);
-	// print_1D_array(h_mask, MASK_WIDTH);
-	// Check initialized values
-	// printf("Checking Intialized value for ghost cell\n");
 	printf("\t... done\n\n");
+
+	// Allocate arrays on host memory (calloc will use zero-initialization)
+	float *h_output_gold = (float *)calloc(P_ARR_LEN, sizeof(float)); // result computed in CPU
+	float *h_output_data = (float *)calloc(P_ARR_LEN, sizeof(float)); // result computed in GPU
+
+	// Allocate memory on GPU device
+	float *d_input, *d_mask, *d_output_data; // Arrays on GPU global memory
+	cudaMalloc((void **)&d_input, N_ARR_LEN * sizeof(float));
+	cudaMalloc((void **)&d_mask, MASK_WIDTH * sizeof(float));
+	cudaMalloc((void **)&d_output_data, P_ARR_LEN * sizeof(float));
 
 	/* ====================== Running code on CPU =============== */
 	// Warmup
@@ -219,6 +228,7 @@ int main(int argc, char *argv[])
 	printf("%7d, \t%12d, \t%13d, \t%13.8g", N_ARR_LEN, MASK_WIDTH, P_ARR_LEN, (double)CPNS * 1.0e3 * elapsed_cpu);
 	printf("\n");
 
+
 	/* ====================== Running code on GPU =============== */
 	printf("==========> All CPU tests are done! Now, running GPU code!\n");
 	// Select GPU
@@ -235,21 +245,27 @@ int main(int argc, char *argv[])
 	// Transfer the arrays to the GPU memory
 	CUDA_SAFE_CALL(cudaMemcpy(d_input, h_input, N_ARR_LEN * sizeof(float), cudaMemcpyHostToDevice));
 	CUDA_SAFE_CALL(cudaMemcpy(d_mask, h_mask, MASK_WIDTH * sizeof(float), cudaMemcpyHostToDevice));
-	CUDA_SAFE_CALL(cudaMemcpy(d_output_data, h_output_data, P_ARR_LEN * sizeof(float), cudaMemcpyHostToDevice));
+	// CUDA_SAFE_CALL(cudaMemcpy(d_output_data, h_output_data, P_ARR_LEN * sizeof(float), cudaMemcpyHostToDevice));
 
 	// Transfer M to device constant memory
 	CUDA_SAFE_CALL(cudaMemcpyToSymbol(d_mask_constant, h_mask, MASK_WIDTH * sizeof(float))); // cudaMemcpyToSymbol(dest, src, size)
 
 	// Launch the kernel
 	cudaPrintfInit();
-	// dim3 dimGrid(ceil(P_ARR_LEN / 16), ceil(P_ARR_LEN / 16)); // Shape of grid = # of elements in a row divided by the number of threads per block row
-	// dim3 dimBlock(16, 16);
+
+	// For 1D CNN
+	int THREADS = NUM_THREADS_PER_BLOCK;
+	int GRID = (P_ARR_LEN + THREADS - 1) / THREADS;
+	// Amount of space per-block for shared memory
+	// This is padded by the overhanging radius on either side
+	size_t SHMEM = (THREADS + HALO_CELL*2) * sizeof(int);
+
+	// For 2D CNN
 	dim3 dimGrid(ceil(P_ARR_LEN / NUM_THREADS_PER_BLOCK), 1); // Shape of grid = # of elements in a row divided by the number of threads per block row
 	dim3 dimBlock(NUM_THREADS_PER_BLOCK, 1);
 
-	int taskid = 3; // 1(1D single block) --> 2(1D multi-block) --> 3(1D tiled algo with shared memory)
 	printf("==============>Running taskid #: %d on GPU!\n", taskid);
-	printf("1(1D single block) --> 2(1D multi-block) --> 3(1D mulit-block with mask in constant memory) --> 4(tiled algo with Strategy 1) --> 5(tiled algo with Strategy 2(shared + global memory))\n");
+	printf("1(1D single block) --> 2(1D multi-block) --> 3(1D mulit-block with mask in constant memory) --> 4(tiled algo with Strategy 1) --> 5(1D tiled strategy 2)\n");
 	switch (taskid){
 	case 1:
 		// single block, each thread compute single output
@@ -262,17 +278,16 @@ int main(int argc, char *argv[])
 		cuda_conv_1D_multi_block_with_mask_in_constant_memory<<<dimGrid, dimBlock>>>(d_input, d_output_data, MASK_WIDTH, N_ARR_LEN);
 		break;
 	case 4:
-		cuda_conv_1D_tiled_kernel<<<dimGrid, dimBlock>>>(d_input, d_output_data, MASK_WIDTH, N_ARR_LEN);
+		cuda_conv_1D_tiled_and_shared_memory_kernel<<<GRID, THREADS, SHMEM>>>(d_input, d_output_data, MASK_WIDTH, N_ARR_LEN);
 		break;
 	case 5:
-		convolution_1D_tiled_cache_kernel<<<dimGrid, dimBlock>>>(d_input, d_output_data, MASK_WIDTH, N_ARR_LEN);
+		cuda_conv_1D_tiled_and_shared_memory_kernel2<<<GRID, THREADS>>>(d_input, d_output_data, MASK_WIDTH, N_ARR_LEN);
 		break;
 	default:
 		printf("ERROR: You hit an error, no such taskid # %d!n", taskid);
 		break;
 	}
-	cudaPrintfDisplay(stdout, true);
-	cudaPrintfEnd();
+	cudaPrintfDisplay(stdout, true); cudaPrintfEnd();
 
 	// Check for errors during launch
 	CUDA_SAFE_CALL(cudaPeekAtLastError());
@@ -497,34 +512,51 @@ __global__ void cuda_conv_1D_multi_block_with_mask_in_constant_memory(float *N, 
 	P[i] = Pvalue;
 }
 
-__global__ void cuda_conv_1D_tiled_kernel(float *N, float *P, int mask_width, int N_rowlen){
-	int i = blockIdx.x * blockDim.x + threadIdx.x; // i is [0, P_ARR_LEN-1]
-	float Pvalue = 0;
 
-	// Return directly, if threadIdx exceed the size of P
-	int halo_width = (mask_width - 1) / 2; // assume mask_width is odd number
-	/* Return immediately, if we are in the ghost cell, e.g., if N_lenth=5, mask_width=3, and ghost_width=1, then we only compute value for P[1-3], and it require to read value from input array N[0-4]
-	For example
-		N = [0,	1,	2,	3,	4]
-		M =   [.3, .2, .8]
-		P = [0,	x,	x,	x,	0]
-	*/
-	if (i < halo_width || i > (N_rowlen - 1 - halo_width)) return;	// 1 off for idx
-	for (int j = 0; j < mask_width; j++){
-		Pvalue += N[i - halo_width + j] * d_mask_constant[j];
+// Strategy 1:
+__global__ void cuda_conv_1D_tiled_and_shared_memory_kernel(float *N, float *P, int mask_width, int N_rowlen){
+	int tid = blockIdx.x * blockDim.x + threadIdx.x;
+	extern __shared__ int s_array[];  
+
+	int halo_width = (mask_width - 1) / 2; 	// assume mask_width is odd number
+	// Skip the first and last cell for output, e.g, P[0, ..., P_ARR_LEN-1] -->Because those are ghost cell, no input for them to compute
+  	// if (tid < halo_width || tid > (N_rowlen - 1 - halo_width)) return;
+
+	// Load the lower elements first starting at the halo
+	s_array[threadIdx.x] = N[tid]; 
+
+	// Maximum Size of the shared memory array
+	int n_padded = blockDim.x + 2 * halo_width;
+	// Offset for the second set of loads in shared memory
+	int s_offset = threadIdx.x + blockDim.x;
+	// Global offset for the array in DRAM
+	int g_offset = tid + blockDim.x;
+	// Load in the remaining upper elements
+	if (s_offset < n_padded) {
+	  s_array[s_offset] = N[g_offset];
 	}
-	P[i] = Pvalue;
+	
+	__syncthreads();
+	// Temp value for calculation
+	float Pvalue = 0;
+	// Go over each element of the mask
+	for (int j = 0; j < mask_width; j++){
+		Pvalue += s_array[threadIdx.x + j] * d_mask_constant[j];
+	}
+	if (tid >= halo_width || tid < (N_rowlen -  halo_width)){
+		P[tid+halo_width] = Pvalue;
+	}
 }
 
-
+// Strategy 2:
 #define TILE_WIDTH 4
-__global__ void convolution_1D_tiled_cache_kernel(float *N, float *P, int mask_width, int N_rowlen){
+__global__ void cuda_conv_1D_tiled_and_shared_memory_kernel2(float *N, float *P, int mask_width, int N_rowlen){
 	int i = blockIdx.x * blockDim.x + threadIdx.x;
-	// Instantiate shared array N_ds
-	__shared__ float N_ds[TILE_WIDTH];
+	// Instantiate shared array s_array
+	__shared__ float s_array[TILE_WIDTH];
 
 	// Load data with corresponding idx from N
-	N_ds[threadIdx.x] = N[i];
+	s_array[threadIdx.x] = N[i];
 
 	// Making sure all threads have finished loading data into shared memory.
 	__syncthreads();
@@ -549,9 +581,9 @@ __global__ void convolution_1D_tiled_cache_kernel(float *N, float *P, int mask_w
 		// Check the boundary
 		if (N_index >= 0 && N_index < N_rowlen){
 			// Decide whether should read from global memory or shared memory?
-			int reading_from_N_ds = ((N_index >= this_tile_start_point) && (N_index < next_tile_start_point));
-			if (reading_from_N_ds){
-				Pvalue += N_ds[threadIdx.x - halo_width + j] * d_mask_constant[j];
+			int reading_from_s_array = ((N_index >= this_tile_start_point) && (N_index < next_tile_start_point));
+			if (reading_from_s_array){
+				Pvalue += s_array[threadIdx.x - halo_width + j] * d_mask_constant[j];
 			}else {
 				Pvalue += N[N_index] * d_mask_constant[j];
 			}
@@ -559,3 +591,5 @@ __global__ void convolution_1D_tiled_cache_kernel(float *N, float *P, int mask_w
 	}
 	P[i] = Pvalue;
 }
+
+
