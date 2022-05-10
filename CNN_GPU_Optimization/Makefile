@@ -18,8 +18,8 @@ test_1d_conv: ./test_1d_conv.cu
 clear: #Remove all object code
 	rm -rf *.o 
 
-zip: Lab8_Report.pdf makefile 
-	zip Zhengqi_Dong_lab8.zip test_1d_conv.cu
+zip: EC527_Final_Report.pdf makefile 
+	zip EC527_Project.zip EC527_Final_Report.pdf test_1d_conv.cu Makefile cuPrintf.cuh cuPrintf.cu
 
 # lab3: lab3.o flight_profiles.o helper_function.o plane_allocation_and_recycling.o
 # 	gcc -g $^ -L. -llinkedlist -latc -lncurses -lm -o $@
